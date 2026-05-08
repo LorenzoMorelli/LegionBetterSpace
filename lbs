@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+LegionBetterSpace — interactive installer / uninstaller / doctor
+
+Run from the project root (or anywhere — the path is resolved relative
+to this script's location):
+
+    ./lbs
+
+Pick a service to install or uninstall, run the global doctor, or quit.
+The menu loops until you choose to exit.
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+PROJECT_DIR = Path(os.path.realpath(__file__)).parent
+
+# (display name, installer script relative to project, marker for "installed")
+TOOLS = [
+    ("brightness-bridge",
+     "brightness-bridge/brightness-bridge",
+     Path.home() / ".local/bin/brightness-bridge"),
+    ("controller-rgb",
+     "controller-rgb/controller-rgb",
+     Path("/usr/local/bin/controller-rgb")),
+    ("gamescope-gestures",
+     "gamescope-gestures/gamescope-gestures",
+     Path("/usr/local/bin/gamescope-gestures")),
+    ("mode-saver",
+     "mode-saver/mode-saver",
+     Path("/usr/local/bin/steamos-session-select")),
+]
+
+
+def is_installed(marker):
+    try:
+        return marker.exists() or marker.is_symlink()
+    except (OSError, PermissionError):
+        return False
+
+
+def run_subcommand(tool, subcommand):
+    name, rel, _ = tool
+    script = PROJECT_DIR / rel
+    if not script.exists():
+        print(f"\nERROR: {script} not found.\n")
+        return
+    print(f"\n--- {name}: {subcommand} ---")
+    subprocess.run([str(script), subcommand])
+    print()
+
+
+def pick_tool(action):
+    print(f"\nWhich service to {action}?")
+    for i, (name, _, marker) in enumerate(TOOLS, 1):
+        status = "installed" if is_installed(marker) else "not installed"
+        print(f"  {i}) {name:22} [{status}]")
+    print("  b) Back")
+    while True:
+        choice = input("> ").strip().lower()
+        if choice == 'b':
+            return None
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(TOOLS):
+                return TOOLS[idx]
+        except ValueError:
+            pass
+        print("Invalid choice.")
+
+
+def cmd_doctor_all():
+    print()
+    for name, rel, marker in TOOLS:
+        print("=" * 60)
+        print(f"  {name}")
+        print("=" * 60)
+        if not is_installed(marker):
+            print("Not installed.\n")
+            continue
+        script = PROJECT_DIR / rel
+        if not script.exists():
+            print(f"ERROR: {script} not found in project.\n")
+            continue
+        subprocess.run([str(script), "doctor"])
+        print()
+    input("Press Enter to continue... ")
+
+
+def show_main_menu():
+    print()
+    print("=" * 40)
+    print("  LegionBetterSpace")
+    print("=" * 40)
+    for name, _, marker in TOOLS:
+        status = "[installed]" if is_installed(marker) else "[--       ]"
+        print(f"  {status}  {name}")
+    print()
+    print("  i) Install a service")
+    print("  u) Uninstall a service")
+    print("  d) Doctor (run on all services)")
+    print("  q) Quit")
+    print()
+
+
+def main():
+    if not all((PROJECT_DIR / rel).exists() for _, rel, _ in TOOLS):
+        print(f"ERROR: not all installer scripts found under {PROJECT_DIR}.",
+              file=sys.stderr)
+        return 1
+    while True:
+        show_main_menu()
+        try:
+            choice = input("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if choice in ('q', 'quit', 'exit'):
+            return 0
+        if choice == 'i':
+            tool = pick_tool("install")
+            if tool is not None:
+                run_subcommand(tool, "install")
+        elif choice == 'u':
+            tool = pick_tool("uninstall")
+            if tool is not None:
+                run_subcommand(tool, "uninstall")
+        elif choice == 'd':
+            cmd_doctor_all()
+        else:
+            print("Invalid choice.")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

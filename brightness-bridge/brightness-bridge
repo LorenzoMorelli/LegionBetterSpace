@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""
+Legion Go 2 Brightness Bridge
+
+Bridges Steam's native brightness slider into the gamescope X11 atom that
+gamescope honors in HDR PQ mode. Workaround for gamescope#1987.
+"""
+
+import os
+import sys
+import select
+import shutil
+import struct
+import subprocess
+import signal
+import time
+from pathlib import Path
+
+BACKLIGHT_DIR   = "/sys/class/backlight/amdgpu_bl1"
+BRIGHTNESS_FILE = f"{BACKLIGHT_DIR}/brightness"
+ACTUAL_FILE     = f"{BACKLIGHT_DIR}/actual_brightness"
+MAX_FILE        = f"{BACKLIGHT_DIR}/max_brightness"
+
+ATOM_NAME = "GAMESCOPE_SDR_ON_HDR_CONTENT_BRIGHTNESS"
+NITS_MIN  = 5.0
+NITS_MAX  = 500.0
+
+GAMESCOPE_ENV = Path(
+    os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+) / "gamescope-environment"
+
+SERVICE_NAME = "brightness-bridge.service"
+USER_SVC_DIR = Path(
+    os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+) / "systemd/user"
+SERVICE_FILE = USER_SVC_DIR / SERVICE_NAME
+USER_BIN_DIR = Path(
+    os.environ.get("XDG_BIN_HOME", str(Path.home() / ".local/bin"))
+)
+INSTALLED_SCRIPT = USER_BIN_DIR / "brightness-bridge"
+
+
+def read_int(path):
+    with open(path) as f:
+        return int(f.read().strip())
+
+
+def get_display():
+    """Read DISPLAY from gamescope's env dump, fall back to :0."""
+    try:
+        with open(GAMESCOPE_ENV) as f:
+            for line in f:
+                if line.startswith("DISPLAY="):
+                    return line.partition("=")[2].strip().strip('"')
+    except FileNotFoundError:
+        pass
+    return os.environ.get("DISPLAY", ":0")
+
+
+def percent_to_nits_bits(percent):
+    p = max(0.0, min(100.0, percent))
+    nits = NITS_MIN + (p / 100.0) * (NITS_MAX - NITS_MIN)
+    return struct.unpack("I", struct.pack("f", nits))[0], nits
+
+
+def set_atom(percent, display):
+    int_bits, nits = percent_to_nits_bits(percent)
+    env = {**os.environ, "DISPLAY": display}
+    try:
+        r = subprocess.run(
+            ["xprop", "-root", "-f", ATOM_NAME, "32c",
+             "-set", ATOM_NAME, str(int_bits)],
+            env=env, capture_output=True, timeout=2,
+        )
+        return r.returncode == 0, nits
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False, nits
+
+
+def wait_for_gamescope(timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if GAMESCOPE_ENV.exists():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def run_daemon():
+    if not Path(BACKLIGHT_DIR).exists():
+        print(f"FATAL: {BACKLIGHT_DIR} not found", flush=True)
+        return 2
+
+    print(f"brightness-bridge starting (atom={ATOM_NAME}, "
+          f"range={NITS_MIN}-{NITS_MAX} nits)", flush=True)
+
+    if not wait_for_gamescope(30):
+        print(f"WARN: {GAMESCOPE_ENV} not found after 30s", flush=True)
+
+    bmax = read_int(MAX_FILE)
+    print(f"max_brightness={bmax}", flush=True)
+
+    # poll(POLLPRI) on actual_brightness wakes us via sysfs_notify - no polling.
+    fd = os.open(ACTUAL_FILE, os.O_RDONLY)
+    poller = select.poll()
+    poller.register(fd, select.POLLPRI | select.POLLERR)
+
+    os.lseek(fd, 0, 0); os.read(fd, 32)
+    last = read_int(BRIGHTNESS_FILE)
+    pct = last * 100.0 / bmax
+    ok, nits = set_atom(pct, get_display())
+    print(f"initial brightness={last} ({pct:.0f}%) -> {nits:.1f} nits "
+          f"ok={ok}", flush=True)
+
+    stopping = [False]
+    def stop(*_): stopping[0] = True
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT,  stop)
+
+    while not stopping[0]:
+        events = poller.poll(1000)
+        if not events:
+            continue
+        # kernfs always sets POLLERR alongside POLLPRI on sysfs_notify - not fatal.
+        if not any(ev & (select.POLLPRI | select.POLLHUP) for _, ev in events):
+            continue
+
+        # Drain queued notifications and only act on the latest value.
+        try:
+            os.lseek(fd, 0, 0); os.read(fd, 32)
+            while poller.poll(0):
+                os.lseek(fd, 0, 0); os.read(fd, 32)
+        except OSError as e:
+            print(f"backlight read error: {e}", flush=True)
+            return 1
+
+        try:
+            cur = read_int(BRIGHTNESS_FILE)
+        except (OSError, ValueError):
+            continue
+        if cur == last:
+            continue
+        last = cur
+        pct = cur * 100.0 / bmax
+        ok, nits = set_atom(pct, get_display())
+        print(f"brightness={cur} ({pct:.0f}%) -> {nits:.1f} nits ok={ok}",
+              flush=True)
+
+    print("brightness-bridge stopping", flush=True)
+    return 0
+
+
+SERVICE_TEMPLATE = """[Unit]
+Description=Legion Go 2 brightness slider bridge (HDR PQ workaround)
+Documentation=https://github.com/ValveSoftware/gamescope/issues/1987
+PartOf=gamescope-session.target
+After=gamescope-session.service
+
+[Service]
+Type=simple
+ExecStart={script}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=gamescope-session.target
+"""
+
+
+def install_service():
+    USER_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    USER_SVC_DIR.mkdir(parents=True, exist_ok=True)
+
+    src = Path(os.path.realpath(__file__))
+    if src != INSTALLED_SCRIPT:
+        shutil.copy2(src, INSTALLED_SCRIPT)
+        INSTALLED_SCRIPT.chmod(0o755)
+        print(f"Installed {INSTALLED_SCRIPT}")
+
+    SERVICE_FILE.write_text(SERVICE_TEMPLATE.format(script=str(INSTALLED_SCRIPT)))
+    print(f"Installed {SERVICE_FILE}\n")
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", SERVICE_NAME], check=True)
+
+    print("It will activate automatically on the next Game Mode session.\n")
+    print("Commands:")
+    print(f"  Status:  systemctl --user status {SERVICE_NAME}")
+    print(f"  Logs:    journalctl --user -u {SERVICE_NAME} -f")
+    print(f"  Restart: systemctl --user restart {SERVICE_NAME}")
+
+    if GAMESCOPE_ENV.exists():
+        try:
+            subprocess.run(["systemctl", "--user", "start", SERVICE_NAME],
+                           check=True)
+            print("\nGame Mode is active - service started now.")
+        except subprocess.CalledProcessError:
+            pass
+
+
+def uninstall_service():
+    subprocess.run(["systemctl", "--user", "stop", SERVICE_NAME],
+                   capture_output=True)
+    subprocess.run(["systemctl", "--user", "disable", SERVICE_NAME],
+                   capture_output=True)
+
+    removed = False
+    if SERVICE_FILE.exists():
+        SERVICE_FILE.unlink()
+        print(f"Removed {SERVICE_FILE}")
+        removed = True
+    if INSTALLED_SCRIPT.exists():
+        INSTALLED_SCRIPT.unlink()
+        print(f"Removed {INSTALLED_SCRIPT}")
+        removed = True
+    if not removed:
+        print("Nothing to remove")
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"])
+
+
+def doctor():
+    print("=== brightness-bridge doctor ===\n")
+    issues = []
+
+    if Path(BRIGHTNESS_FILE).exists():
+        try:
+            cur = read_int(BRIGHTNESS_FILE)
+            mx  = read_int(MAX_FILE)
+            print(f"[ok]   backlight: {BACKLIGHT_DIR}  ({cur}/{mx} = "
+                  f"{cur*100/mx:.0f}%)")
+        except OSError as e:
+            issues.append(f"cannot read {BRIGHTNESS_FILE}: {e}")
+    else:
+        issues.append(f"backlight not found at {BACKLIGHT_DIR}")
+
+    if subprocess.run(["which", "xprop"], capture_output=True).returncode != 0:
+        issues.append("xprop not found (sudo pacman -S xorg-xprop)")
+    else:
+        print("[ok]   xprop available")
+
+    if GAMESCOPE_ENV.exists():
+        d = get_display()
+        print(f"[ok]   in Game Mode (DISPLAY={d})")
+        env = {**os.environ, "DISPLAY": d}
+        r = subprocess.run(
+            ["xprop", "-root", "GAMESCOPE_DISPLAY_HDR_ENABLED"],
+            env=env, capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode == 0:
+            print(f"       {r.stdout.strip()}")
+    else:
+        print(f"[info] not in Game Mode (no {GAMESCOPE_ENV})")
+
+    if INSTALLED_SCRIPT.exists():
+        print(f"[ok]   script installed:  {INSTALLED_SCRIPT}")
+    else:
+        print(f"[info] script not in {INSTALLED_SCRIPT}")
+
+    if SERVICE_FILE.exists():
+        print(f"[ok]   service installed: {SERVICE_FILE}")
+        for prop in ("is-enabled", "is-active"):
+            r = subprocess.run(
+                ["systemctl", "--user", prop, SERVICE_NAME],
+                capture_output=True, text=True,
+            )
+            print(f"       {prop:11s} {r.stdout.strip()}")
+    else:
+        print("[info] service not installed (run: brightness-bridge install)")
+
+    print()
+    if issues:
+        print("Issues found:")
+        for i in issues:
+            print(f"  - {i}")
+        return 1
+    print("All checks passed.")
+    return 0
+
+
+def show_help():
+    print("""Legion Go 2 Brightness Bridge
+
+Bridges Steam's native brightness slider into the gamescope X11 atom that
+gamescope honors when HDR PQ is active. Workaround for gamescope#1987.
+
+Usage: brightness-bridge [command]
+
+Commands:
+  install     Install and enable the user systemd service
+  uninstall   Disable and remove the service
+  doctor      Check system state and dependencies
+  help        Show this help
+
+Without arguments, runs the bridge daemon in the foreground (used by the
+systemd unit).
+""")
+
+
+def main():
+    if len(sys.argv) <= 1:
+        return run_daemon()
+    cmd = sys.argv[1]
+    handlers = {
+        "install":   install_service,
+        "uninstall": uninstall_service,
+        "doctor":    doctor,
+        "help":      show_help,
+        "--help":    show_help,
+        "-h":        show_help,
+    }
+    h = handlers.get(cmd)
+    if h is None:
+        print(f"Unknown command: {cmd}\n")
+        show_help()
+        return 2
+    rc = h()
+    return rc if isinstance(rc, int) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

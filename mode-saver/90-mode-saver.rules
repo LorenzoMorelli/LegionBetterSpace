@@ -1,0 +1,12 @@
+// Allow members of the wheel group to start session-restore.service
+// without a password prompt. The steamos-session-select wrapper triggers
+// this unit on every session switch to update the display manager autologin
+// config (gamescope -> autologin, plasma -> require password).
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "session-restore.service" &&
+        action.lookup("verb") == "start" &&
+        subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});

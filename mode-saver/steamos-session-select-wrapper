@@ -1,0 +1,39 @@
+#!/bin/bash
+# Wrapper for steamos-session-select.
+# Installed to /usr/local/bin/ to take PATH priority over /usr/bin/.
+#
+# For 'gamescope' and 'plasma' targets we replace the upstream behaviour
+# (which would call /usr/lib/steamos/steam-set-session and overwrite our
+# autologin override) with our own flow:
+#   1. save the target session to ~/.config/last-session-mode
+#   2. trigger session-restore.service (passwordless via polkit rule) so
+#      zz-steamos-autologin.conf has the right autologin config when the
+#      display manager re-reads it after the upcoming logout
+#   3. log out the current session the same way upstream does
+#
+# For 'persistent' / 'oneshot' / unknown args we delegate to the upstream
+# script unchanged.
+
+STATE_FILE="$HOME/.config/last-session-mode"
+
+case "$1" in
+    gamescope|plasma)
+        target="$1"
+        mkdir -p "$(dirname "$STATE_FILE")"
+        echo "$target" > "$STATE_FILE"
+
+        # Apply DM autologin config now (synchronous, no password prompt).
+        systemctl start session-restore.service
+
+        # Log out the current session
+        if [[ "$target" == "gamescope" ]]; then
+            qdbus6 org.kde.Shutdown /Shutdown org.kde.Shutdown.logout
+        else
+            steam -shutdown 2>/dev/null || true
+            systemctl --user stop gamescope-session.target
+        fi
+        ;;
+    *)
+        exec /usr/bin/steamos-session-select "$@"
+        ;;
+esac

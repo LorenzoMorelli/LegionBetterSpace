@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+# Controller RGB Controller Script (Python version)
+
+import os
+import sys
+import shutil
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+# Paths
+LED_PATH = Path("/sys/class/leds/go:rgb:joystick_rings")
+UDEV_RULE = Path("/etc/udev/rules.d/99-controller-rgb.rules")
+INSTALLED_SCRIPT = Path("/usr/local/bin/controller-rgb")
+KAMELEON_PLUGIN = Path("/usr/lib/qt6/plugins/kf6/kded/kameleon.so")
+KAMELEON_DISABLED = Path("/usr/lib/qt6/plugins/kf6/kded/kameleon.so.disabled")
+
+
+def user_config_path():
+    """Return the user's config path, resolving correctly under sudo."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and sudo_user != "root":
+        try:
+            import pwd
+            home = Path(pwd.getpwnam(sudo_user).pw_dir)
+        except KeyError:
+            home = Path(f"/home/{sudo_user}")
+    else:
+        home = Path.home()
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else home / ".config"
+    return base / "controller-rgb.conf"
+
+
+CONFIG_FILE = user_config_path()
+
+
+def ensure_root(cmd):
+    """Re-execute with sudo if not root."""
+    if os.geteuid() != 0:
+        print(f"'{cmd}' requires root. Requesting sudo...")
+        script_path = os.path.realpath(__file__)
+        os.execvp('sudo', ['sudo', sys.executable, script_path] + sys.argv[1:])
+
+# Presets
+PRESETS = {
+    "red": (255, 0, 0),
+    "green": (0, 255, 0),
+    "blue": (0, 0, 255),
+    "white": (255, 255, 255),
+    "orange": (255, 85, 0),
+    "purple": (128, 0, 255),
+    "cyan": (0, 255, 255),
+    "pink": (255, 0, 128),
+    "yellow": (255, 255, 0),
+}
+
+VALID_EFFECTS = ["monocolor", "breathe", "chroma", "rainbow"]
+
+
+def show_help():
+    help_text = """Controller RGB Controller
+
+Usage: controller-rgb <command> [arguments]
+
+Daily commands (no sudo required):
+  color <r> <g> <b>    Set RGB color (0-255 each)
+  hex <#RRGGBB>        Set color from hex code
+  effect <name>        Set effect: monocolor, breathe, chroma, rainbow
+  brightness <0-100>   Set brightness level
+  speed <0-100>        Set effect speed
+  off                  Turn off LEDs
+  on                   Turn on LEDs
+  status               Show current settings
+  preset <name>        Presets: red, green, blue, white, orange, purple, cyan, pink, yellow
+
+Setup commands (auto-elevate to sudo):
+  install              Install to /usr/local/bin and enable persistence (udev rule)
+  uninstall            Remove the installed copy, udev rule, and optionally the config
+
+Examples:
+  controller-rgb preset purple       # Set purple
+  controller-rgb effect rainbow      # Rainbow effect
+  controller-rgb brightness 80       # 80% brightness"""
+    print(help_text)
+
+
+def check_led():
+    if not LED_PATH.is_dir():
+        print(f"Error: LED device not found at {LED_PATH}")
+        sys.exit(1)
+
+
+def read_file(path):
+    """Read content from a file."""
+    return Path(path).read_text().strip()
+
+
+def write_file(path, content):
+    """Write content to a file."""
+    Path(path).write_text(str(content))
+
+
+def save_config():
+    """Save current LED settings to config file."""
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    effect = read_file(LED_PATH / "effect")
+    brightness = read_file(LED_PATH / "brightness")
+    color = read_file(LED_PATH / "multi_intensity")
+    speed = read_file(LED_PATH / "speed")
+
+    config_content = f'''EFFECT="{effect}"
+BRIGHTNESS="{brightness}"
+COLOR="{color}"
+SPEED="{speed}"
+'''
+    CONFIG_FILE.write_text(config_content)
+
+
+# Kameleon handling functions
+
+def is_kameleon_installed():
+    return KAMELEON_PLUGIN.exists() or KAMELEON_DISABLED.exists()
+
+
+def is_kameleon_enabled():
+    return KAMELEON_PLUGIN.exists()
+
+
+def disable_kameleon():
+    if KAMELEON_PLUGIN.exists():
+        print("Disabling Kameleon KDE module (requires sudo)...")
+        subprocess.run(["sudo", "mv", str(KAMELEON_PLUGIN), str(KAMELEON_DISABLED)], check=True)
+        # Unload from current session if running
+        subprocess.run(
+            ["qdbus6", "org.kde.kded6", "/kded", "org.kde.kded6.unloadModule", "kameleon"],
+            capture_output=True
+        )
+        print("Kameleon disabled.")
+        return True
+    return False
+
+
+def enable_kameleon():
+    if KAMELEON_DISABLED.exists():
+        print("Re-enabling Kameleon KDE module (requires sudo)...")
+        subprocess.run(["sudo", "mv", str(KAMELEON_DISABLED), str(KAMELEON_PLUGIN)], check=True)
+        print("Kameleon re-enabled. It will load on next login.")
+        return True
+    return False
+
+
+def handle_kameleon_conflict():
+    if not is_kameleon_installed():
+        return
+
+    if is_kameleon_enabled():
+        print("")
+        print("Kameleon KDE module detected!")
+        print("This module syncs KDE accent color to device LEDs and will")
+        print("override your custom LED settings when switching sessions.")
+        print("")
+        reply = input("Disable Kameleon to avoid conflicts? [Y/n] ").strip().lower()
+        if reply != 'n':
+            disable_kameleon()
+        else:
+            print("Warning: Your LED settings may be overridden by Kameleon.")
+
+
+def install():
+    """Copy the script to /usr/local/bin and enable persistence via udev."""
+    ensure_root("install")
+
+    src = Path(os.path.realpath(__file__))
+    INSTALLED_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+    if src != INSTALLED_SCRIPT:
+        shutil.copy2(src, INSTALLED_SCRIPT)
+        INSTALLED_SCRIPT.chmod(0o755)
+        print(f"Installed {INSTALLED_SCRIPT}")
+
+    config = user_config_path()
+    UDEV_RULE.write_text(f'''# Controller RGB LED persistence
+SUBSYSTEM=="leds", KERNEL=="go:rgb:joystick_rings", ACTION=="add|change", RUN+="/bin/bash -c 'sleep 3 && {INSTALLED_SCRIPT} apply-saved {config}'"
+''')
+    subprocess.run(["udevadm", "control", "--reload-rules"], check=True)
+    print(f"Installed {UDEV_RULE}")
+
+    handle_kameleon_conflict()
+
+    print()
+    print("Done. Use 'controller-rgb <command>' from any terminal.")
+    print(f"Settings will persist across reboots/suspend (config: {config}).")
+
+
+def uninstall():
+    """Remove the installed script, udev rule, and optionally the saved config."""
+    ensure_root("uninstall")
+
+    removed = False
+    if UDEV_RULE.exists():
+        UDEV_RULE.unlink()
+        subprocess.run(["udevadm", "control", "--reload-rules"], check=True)
+        print(f"Removed {UDEV_RULE}")
+        removed = True
+    if INSTALLED_SCRIPT.exists():
+        INSTALLED_SCRIPT.unlink()
+        print(f"Removed {INSTALLED_SCRIPT}")
+        removed = True
+    if not removed:
+        print("Nothing to remove")
+
+    if KAMELEON_DISABLED.exists():
+        reply = input("Re-enable Kameleon KDE module? [Y/n] ").strip().lower()
+        if reply != 'n':
+            enable_kameleon()
+
+    config = user_config_path()
+    if config.exists():
+        reply = input(f"Remove saved config ({config})? [y/N] ").strip().lower()
+        if reply == 'y':
+            config.unlink()
+            print("Removed config")
+
+
+def set_color(r, g, b):
+    write_file(LED_PATH / "multi_intensity", f"{r} {g} {b}")
+    print(f"Color set to RGB({r}, {g}, {b})")
+    save_config()
+
+
+def set_hex(hex_color):
+    hex_color = hex_color.lstrip('#')
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    write_file(LED_PATH / "multi_intensity", f"{r} {g} {b}")
+    print(f"Color set to RGB({r}, {g}, {b})")
+    save_config()
+
+
+def set_effect(effect):
+    if effect not in VALID_EFFECTS:
+        print(f"Invalid effect. Choose: {', '.join(VALID_EFFECTS)}")
+        sys.exit(1)
+    write_file(LED_PATH / "effect", effect)
+    print(f"Effect set to: {effect}")
+    save_config()
+
+
+def set_brightness(level):
+    level = int(level)
+    if 0 <= level <= 100:
+        write_file(LED_PATH / "brightness", level)
+        print(f"Brightness set to: {level}%")
+        save_config()
+        ensure_persistence()
+    else:
+        print("Brightness must be 0-100")
+        sys.exit(1)
+
+
+def set_speed(speed):
+    speed = int(speed)
+    if 0 <= speed <= 100:
+        write_file(LED_PATH / "speed", speed)
+        print(f"Speed set to: {speed}")
+        save_config()
+        ensure_persistence()
+    else:
+        print("Speed must be 0-100")
+        sys.exit(1)
+
+
+def led_off():
+    write_file(LED_PATH / "brightness", "0")
+    print("LEDs turned off")
+    save_config()
+
+
+def led_on():
+    write_file(LED_PATH / "brightness", "40")
+    print("LEDs turned on (brightness 40%)")
+    save_config()
+
+
+def show_status():
+    print("=== Controller RGB Status ===")
+    print(f"Effect:     {read_file(LED_PATH / 'effect')}")
+    print(f"Mode:       {read_file(LED_PATH / 'mode')}")
+    print(f"Brightness: {read_file(LED_PATH / 'brightness')}%")
+    print(f"Color RGB:  {read_file(LED_PATH / 'multi_intensity')}")
+    print(f"Speed:      {read_file(LED_PATH / 'speed')}")
+    print("")
+    if UDEV_RULE.exists():
+        print("Persistence: ACTIVE")
+    else:
+        print("Persistence: INACTIVE")
+    if is_kameleon_installed():
+        if is_kameleon_enabled():
+            print("Kameleon:   ENABLED (may override LED settings)")
+        else:
+            print("Kameleon:   DISABLED")
+
+
+def preset(name):
+    if name not in PRESETS:
+        print(f"Unknown preset. Available: {', '.join(PRESETS.keys())}")
+        sys.exit(1)
+    r, g, b = PRESETS[name]
+    write_file(LED_PATH / "multi_intensity", f"{r} {g} {b}")
+    print(f"Preset '{name}' applied: RGB({r}, {g}, {b})")
+    save_config()
+
+
+def apply_saved(config_path=None):
+    config = Path(config_path) if config_path else CONFIG_FILE
+    log_path = Path("/tmp/controller-rgb-debug.log")
+
+    with open(log_path, "a") as log:
+        log.write(f"{datetime.now()}: apply_saved called\n")
+        log.write(f"  config={config}\n")
+        log.write(f"  Config exists: {'YES' if config.exists() else 'NO'}\n")
+
+    if not config.exists():
+        with open(log_path, "a") as log:
+            log.write("  Config not found, exiting\n")
+        sys.exit(0)
+
+    # Parse config file
+    settings = {}
+    for line in config.read_text().splitlines():
+        if '=' in line:
+            key, value = line.split('=', 1)
+            # Remove quotes from value
+            value = value.strip().strip('"')
+            settings[key] = value
+
+    with open(log_path, "a") as log:
+        log.write(f"  Loaded: EFFECT={settings.get('EFFECT')} COLOR={settings.get('COLOR')} BRIGHTNESS={settings.get('BRIGHTNESS')}\n")
+
+    if settings.get('EFFECT'):
+        write_file(LED_PATH / "effect", settings['EFFECT'])
+    if settings.get('COLOR'):
+        write_file(LED_PATH / "multi_intensity", settings['COLOR'])
+    if settings.get('BRIGHTNESS'):
+        write_file(LED_PATH / "brightness", settings['BRIGHTNESS'])
+    if settings.get('SPEED'):
+        write_file(LED_PATH / "speed", settings['SPEED'])
+
+    with open(log_path, "a") as log:
+        log.write("  Settings applied successfully\n")
+
+
+def main():
+    args = sys.argv[1:]
+
+    if not args or args[0] in ["help", "--help", "-h"]:
+        show_help()
+        return
+
+    command = args[0]
+
+    if command == "apply-saved":
+        check_led()
+        config_path = args[1] if len(args) > 1 else None
+        apply_saved(config_path)
+    elif command == "install":
+        install()
+    elif command == "uninstall":
+        uninstall()
+    elif command == "color":
+        check_led()
+        if len(args) != 4:
+            print("Usage: controller-rgb color <r> <g> <b>")
+            sys.exit(1)
+        set_color(int(args[1]), int(args[2]), int(args[3]))
+    elif command == "hex":
+        check_led()
+        if len(args) != 2:
+            print("Usage: controller-rgb hex <#RRGGBB>")
+            sys.exit(1)
+        set_hex(args[1])
+    elif command == "effect":
+        check_led()
+        if len(args) != 2:
+            print("Usage: controller-rgb effect <name>")
+            sys.exit(1)
+        set_effect(args[1])
+    elif command == "brightness":
+        check_led()
+        if len(args) != 2:
+            print("Usage: controller-rgb brightness <0-100>")
+            sys.exit(1)
+        set_brightness(args[1])
+    elif command == "speed":
+        check_led()
+        if len(args) != 2:
+            print("Usage: controller-rgb speed <0-100>")
+            sys.exit(1)
+        set_speed(args[1])
+    elif command == "off":
+        check_led()
+        led_off()
+    elif command == "on":
+        check_led()
+        led_on()
+    elif command == "status":
+        check_led()
+        show_status()
+    elif command == "preset":
+        check_led()
+        if len(args) != 2:
+            print("Usage: controller-rgb preset <name>")
+            sys.exit(1)
+        preset(args[1])
+    else:
+        print(f"Unknown command: {command}")
+        show_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

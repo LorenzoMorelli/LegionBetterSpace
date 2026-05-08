@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+"""
+Legion Go 2 Touch Gestures for Steam/Gamescope
+
+Detects edge swipes on the touchscreen and triggers Steam actions:
+- Swipe from right edge → Open QAM (Quick Access Menu)
+- Swipe from left edge → Open Steam Menu
+"""
+
+import os
+import sys
+import shutil
+import subprocess
+import signal
+import time
+from pathlib import Path
+
+try:
+    import evdev
+    from evdev import ecodes
+except ImportError:
+    print("Error: python-evdev not installed")
+    print("Install with: sudo pacman -S python-evdev")
+    sys.exit(1)
+
+# Configuration
+TOUCHSCREEN_NAME = "GXTP6933:00 27C6:0133"
+TOUCHSCREEN_EXCLUDE = "UNKNOWN"  # Exclude devices with this in the name
+EDGE_PERCENT = 5      # Percentage from edge to detect swipe start
+MIN_SWIPE_PERCENT = 8 # Minimum percentage of screen to travel for valid swipe
+DBUS_PATH = "/org/shadowblip/InputPlumber/CompositeDevice0"
+DBUS_INTERFACE = "org.shadowblip.Input.CompositeDevice"
+DBUS_SERVICE = "org.shadowblip.InputPlumber"
+
+SERVICE_NAME = "gamescope-gestures.service"
+SERVICE_FILE = Path("/etc/systemd/system") / SERVICE_NAME
+INSTALLED_SCRIPT = Path("/usr/local/bin/gamescope-gestures")
+
+# State
+touch_start_x = None
+touch_start_y = None
+touch_current_x = None
+touch_current_y = None
+tracking_id = None
+screen_max_x = 1
+screen_max_y = 1
+
+
+def ensure_root(cmd_name):
+    """Re-execute with sudo if not root."""
+    if os.geteuid() != 0:
+        print(f"'{cmd_name}' requires root. Requesting sudo...")
+        script_path = os.path.realpath(__file__)
+        os.execvp('sudo', ['sudo', sys.executable, script_path] + sys.argv[1:])
+
+
+def find_touchscreen():
+    """Find the touchscreen device."""
+    devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
+    for device in devices:
+        if TOUCHSCREEN_NAME in device.name and TOUCHSCREEN_EXCLUDE not in device.name:
+            return device
+    return None
+
+
+def send_button(button_name):
+    """Send a button press via InputPlumber D-Bus."""
+    try:
+        cmd = [
+            "busctl", "--system", "call",
+            DBUS_SERVICE, DBUS_PATH, DBUS_INTERFACE,
+            "SendButtonChord", "as", "1", button_name
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=2)
+        if result.returncode != 0:
+            # Try alternative path if CompositeDevice0 doesn't exist
+            alt_cmd = cmd.copy()
+            alt_cmd[4] = "/org/shadowblip/InputPlumber/CompositeDevice1"
+            subprocess.run(alt_cmd, capture_output=True, timeout=2)
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"Timeout sending button: {button_name}")
+        return False
+    except Exception as e:
+        print(f"Error sending button: {e}")
+        return False
+
+
+def open_qam():
+    """Open Quick Access Menu."""
+    print("Opening QAM...")
+    send_button("Gamepad:Button:QuickAccess")
+
+
+def open_steam_menu():
+    """Open Steam Menu."""
+    print("Opening Steam Menu...")
+    send_button("Gamepad:Button:Guide")
+
+
+def process_swipe():
+    """Process completed touch and detect swipes."""
+    global touch_start_x, touch_start_y, touch_current_x, touch_current_y
+
+    if None in (touch_start_x, touch_start_y, touch_current_x, touch_current_y):
+        return
+
+    dx = touch_current_x - touch_start_x
+
+    # Calculate thresholds based on screen size
+    edge_threshold = screen_max_x * EDGE_PERCENT / 100
+    min_swipe = screen_max_x * MIN_SWIPE_PERCENT / 100
+
+    # Right edge swipe (start near right edge, swipe left)
+    if touch_start_x > (screen_max_x - edge_threshold) and dx < -min_swipe:
+        open_qam()
+
+    # Left edge swipe (start near left edge, swipe right)
+    elif touch_start_x < edge_threshold and dx > min_swipe:
+        open_steam_menu()
+
+
+def handle_event(event):
+    """Handle touch events."""
+    global touch_start_x, touch_start_y, touch_current_x, touch_current_y, tracking_id
+
+    if event.type == ecodes.EV_ABS:
+        if event.code == ecodes.ABS_MT_TRACKING_ID:
+            if event.value >= 0:
+                # Touch started
+                tracking_id = event.value
+                touch_start_x = None
+                touch_start_y = None
+            else:
+                # Touch ended
+                process_swipe()
+                tracking_id = None
+                touch_start_x = None
+                touch_start_y = None
+                touch_current_x = None
+                touch_current_y = None
+
+        elif event.code == ecodes.ABS_MT_POSITION_X:
+            touch_current_x = event.value
+            if touch_start_x is None:
+                touch_start_x = event.value
+
+        elif event.code == ecodes.ABS_MT_POSITION_Y:
+            touch_current_y = event.value
+            if touch_start_y is None:
+                touch_start_y = event.value
+
+
+def doctor():
+    """Check dependencies and system status."""
+    ensure_root("doctor")
+
+    print("=== Gamescope Gestures Doctor ===")
+    print()
+
+    issues = []
+
+    # Check python-evdev
+    print("[Checking] python-evdev...", end=" ")
+    try:
+        import evdev
+        print("OK")
+    except ImportError:
+        print("MISSING")
+        issues.append(("python-evdev", "sudo pacman -S python-evdev"))
+
+    # Check busctl
+    print("[Checking] busctl...", end=" ")
+    result = subprocess.run(["which", "busctl"], capture_output=True)
+    if result.returncode == 0:
+        print("OK")
+    else:
+        print("MISSING")
+        issues.append(("busctl (systemd)", "sudo pacman -S systemd"))
+
+    # Check InputPlumber service
+    print("[Checking] InputPlumber service...", end=" ")
+    result = subprocess.run(["systemctl", "is-active", "inputplumber"], capture_output=True, text=True)
+    if result.stdout.strip() == "active":
+        print("OK (running)")
+    else:
+        print("NOT RUNNING")
+        issues.append(("InputPlumber", "sudo systemctl start inputplumber"))
+
+    # Check InputPlumber D-Bus
+    print("[Checking] InputPlumber D-Bus...", end=" ")
+    result = subprocess.run([
+        "busctl", "--system", "introspect",
+        DBUS_SERVICE, DBUS_PATH
+    ], capture_output=True)
+    if result.returncode == 0:
+        print("OK")
+    else:
+        print("NOT AVAILABLE")
+        issues.append(("InputPlumber D-Bus", "Restart InputPlumber: sudo systemctl restart inputplumber"))
+
+    # Check touchscreen device
+    print("[Checking] Touchscreen device...", end=" ")
+    device = find_touchscreen()
+    if device:
+        print(f"OK ({device.path})")
+
+        # Get screen dimensions
+        abs_caps = device.capabilities().get(ecodes.EV_ABS, [])
+        max_x = max_y = 0
+        for code, info in abs_caps:
+            if code == ecodes.ABS_MT_POSITION_X:
+                max_x = info.max
+            elif code == ecodes.ABS_MT_POSITION_Y:
+                max_y = info.max
+
+        print(f"            Screen range: X=0-{max_x}, Y=0-{max_y}")
+    else:
+        print("NOT FOUND")
+        issues.append(("Touchscreen", "Check if touchscreen is connected"))
+
+    # Check service status
+    print("[Checking] gamescope-gestures service...", end=" ")
+    result = subprocess.run(["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True)
+    status = result.stdout.strip()
+    if status == "active":
+        print("OK (running)")
+    elif status == "inactive":
+        print("INSTALLED (not running)")
+    else:
+        print("NOT INSTALLED")
+    if INSTALLED_SCRIPT.exists():
+        print(f"            script:  {INSTALLED_SCRIPT}")
+    if SERVICE_FILE.exists():
+        print(f"            unit:    {SERVICE_FILE}")
+
+    print()
+    print("Gestures configured:")
+    print("  Swipe from RIGHT edge → QAM")
+    print("  Swipe from LEFT edge  → Steam Menu")
+
+    # Report issues and offer to fix
+    if issues:
+        print()
+        print(f"Found {len(issues)} issue(s):")
+        for name, fix in issues:
+            print(f"  - {name}: {fix}")
+
+        print()
+        response = input("Do you want to try to fix these issues? [Y/n] ").strip().lower()
+        if response != 'n':
+            for name, fix in issues:
+                print(f"Fixing {name}...")
+                if fix.startswith("sudo "):
+                    subprocess.run(fix.split())
+                else:
+                    print(f"  Manual fix required: {fix}")
+            print()
+            print("Done. Run 'gamescope-gestures doctor' again to verify.")
+    else:
+        print()
+        print("All checks passed!")
+
+
+def run_daemon():
+    """Run the gesture detection daemon."""
+    global screen_max_x, screen_max_y
+
+    ensure_root("run")
+
+    device = find_touchscreen()
+    if not device:
+        print(f"Error: Touchscreen '{TOUCHSCREEN_NAME}' not found")
+        print("Available devices:")
+        for path in evdev.list_devices():
+            d = evdev.InputDevice(path)
+            print(f"  {d.name}")
+        sys.exit(1)
+
+    # Get screen dimensions from device capabilities
+    abs_caps = device.capabilities().get(ecodes.EV_ABS, [])
+    for code, info in abs_caps:
+        if code == ecodes.ABS_MT_POSITION_X:
+            screen_max_x = info.max
+        elif code == ecodes.ABS_MT_POSITION_Y:
+            screen_max_y = info.max
+
+    print(f"Listening for gestures on: {device.name}")
+    print(f"Screen range: X=0-{screen_max_x}, Y=0-{screen_max_y}")
+    print(f"Edge threshold: {EDGE_PERCENT}% ({int(screen_max_x * EDGE_PERCENT / 100)} units)")
+    print(f"Min swipe: {MIN_SWIPE_PERCENT}% ({int(screen_max_x * MIN_SWIPE_PERCENT / 100)} units)")
+    print()
+    print("Swipe from right edge → QAM")
+    print("Swipe from left edge  → Steam Menu")
+    print()
+
+    # Handle graceful shutdown
+    def signal_handler(sig, frame):
+        print("\nStopping...")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    while True:
+        try:
+            for event in device.read_loop():
+                handle_event(event)
+        except OSError as e:
+            # Device disconnected, try to reconnect
+            print(f"Device error: {e}. Reconnecting in 5s...")
+            time.sleep(5)
+            device = find_touchscreen()
+            if not device:
+                print("Touchscreen not found. Retrying in 5s...")
+                continue
+            # Re-read capabilities
+            abs_caps = device.capabilities().get(ecodes.EV_ABS, [])
+            for code, info in abs_caps:
+                if code == ecodes.ABS_MT_POSITION_X:
+                    screen_max_x = info.max
+                elif code == ecodes.ABS_MT_POSITION_Y:
+                    screen_max_y = info.max
+            print(f"Reconnected to: {device.name}")
+        except Exception as e:
+            print(f"Error: {e}")
+            time.sleep(5)
+
+
+def install_service():
+    """Install systemd system service."""
+    ensure_root("install")
+
+    src = Path(os.path.realpath(__file__))
+    if src != INSTALLED_SCRIPT:
+        INSTALLED_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, INSTALLED_SCRIPT)
+        INSTALLED_SCRIPT.chmod(0o755)
+        print(f"Installed {INSTALLED_SCRIPT}")
+
+    SERVICE_FILE.write_text(f"""[Unit]
+Description=Legion Go 2 Touch Gestures
+After=multi-user.target inputplumber.service
+Wants=inputplumber.service
+
+[Service]
+ExecStart={INSTALLED_SCRIPT} run
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+""")
+    print(f"Installed {SERVICE_FILE}\n")
+
+    subprocess.run(["systemctl", "daemon-reload"])
+    subprocess.run(["systemctl", "enable", SERVICE_NAME])
+    subprocess.run(["systemctl", "restart", SERVICE_NAME])
+
+    print("Service installed and started.\n")
+    print("Commands:")
+    print(f"  Status:  systemctl status {SERVICE_NAME}")
+    print(f"  Restart: systemctl restart {SERVICE_NAME}")
+    print(f"  Logs:    journalctl -u {SERVICE_NAME} -f")
+
+
+def uninstall_service():
+    """Remove systemd system service and the installed script."""
+    ensure_root("uninstall")
+
+    subprocess.run(["systemctl", "stop", SERVICE_NAME], capture_output=True)
+    subprocess.run(["systemctl", "disable", SERVICE_NAME], capture_output=True)
+
+    removed = False
+    if SERVICE_FILE.exists():
+        SERVICE_FILE.unlink()
+        print(f"Removed {SERVICE_FILE}")
+        removed = True
+    if INSTALLED_SCRIPT.exists():
+        INSTALLED_SCRIPT.unlink()
+        print(f"Removed {INSTALLED_SCRIPT}")
+        removed = True
+    if not removed:
+        print("Nothing to remove")
+
+    subprocess.run(["systemctl", "daemon-reload"])
+
+
+def show_help():
+    """Show help message."""
+    print("""Legion Go 2 Touch Gestures
+
+Usage: gamescope-gestures <command>
+
+Commands:
+  run              Run gesture detection (foreground, auto-elevates)
+  install          Install as systemd service (auto-elevates)
+  uninstall        Remove service and optionally this script (auto-elevates)
+  doctor           Check dependencies and system status (auto-elevates)
+  test-qam         Test QAM button
+  test-menu        Test Steam Menu button
+  debug            Show raw touch events (auto-elevates)
+  help             Show this help
+
+Gestures:
+  Swipe from RIGHT edge → Open QAM (Quick Access Menu)
+  Swipe from LEFT edge  → Open Steam Menu
+
+Examples:
+  ./gamescope-gestures run          # Test gestures (will ask for sudo)
+  ./gamescope-gestures install      # Install service (will ask for sudo)
+  ./gamescope-gestures doctor       # Check system status (will ask for sudo)
+""")
+
+
+def debug_touch():
+    """Debug mode - print raw touch events."""
+    ensure_root("debug")
+
+    device = find_touchscreen()
+    if not device:
+        print(f"Error: Touchscreen '{TOUCHSCREEN_NAME}' not found")
+        print("Available devices:")
+        for path in evdev.list_devices():
+            d = evdev.InputDevice(path)
+            print(f"  {d.name} -> {path}")
+        sys.exit(1)
+
+    print(f"Debug mode - Device: {device.name}")
+    print(f"Path: {device.path}")
+    print()
+
+    # Get device info
+    caps = device.capabilities(verbose=True)
+    if ('EV_ABS', 3) in caps or ecodes.EV_ABS in device.capabilities():
+        abs_caps = device.capabilities().get(ecodes.EV_ABS, [])
+        for code, info in abs_caps:
+            if code == ecodes.ABS_MT_POSITION_X:
+                print(f"X range: {info.min} - {info.max}")
+            elif code == ecodes.ABS_MT_POSITION_Y:
+                print(f"Y range: {info.min} - {info.max}")
+
+    print()
+    print("Touch the screen to see events. Press Ctrl+C to stop.")
+    print()
+
+    try:
+        for event in device.read_loop():
+            if event.type == ecodes.EV_ABS:
+                code_name = ecodes.ABS.get(event.code, event.code)
+                print(f"ABS {code_name}: {event.value}")
+            elif event.type == ecodes.EV_KEY:
+                code_name = ecodes.KEY.get(event.code, event.code)
+                print(f"KEY {code_name}: {event.value}")
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
+def main():
+    if len(sys.argv) < 2:
+        show_help()
+        sys.exit(0)
+
+    cmd = sys.argv[1]
+
+    if cmd == "run":
+        run_daemon()
+    elif cmd == "install":
+        install_service()
+    elif cmd == "uninstall":
+        uninstall_service()
+    elif cmd == "doctor":
+        doctor()
+    elif cmd == "test-qam":
+        open_qam()
+    elif cmd == "test-menu":
+        open_steam_menu()
+    elif cmd == "debug":
+        debug_touch()
+    elif cmd in ("help", "--help", "-h"):
+        show_help()
+    else:
+        print(f"Unknown command: {cmd}")
+        show_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

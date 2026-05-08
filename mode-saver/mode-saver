@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""
+Mode Saver installer
+
+Installs and uninstalls the mode-saver helpers that make CachyOS-Handheld
+remember whether the last session was Game Mode (gamescope) or Desktop
+Mode (plasma) and restart in the same mode.
+
+The runtime helpers (bash scripts and config files) live next to this
+installer; this script only copies them to their standard system paths,
+sets up the systemd service and polkit rule, and reverses everything on
+uninstall.
+"""
+
+import os
+import pwd
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+PROJECT_DIR = Path(os.path.realpath(__file__)).parent
+
+# (src filename in PROJECT_DIR, dst absolute path, mode)
+FILES = [
+    ("steamos-session-select-wrapper", Path("/usr/local/bin/steamos-session-select"),                  0o755),
+    ("session-restore.sh",             Path("/usr/local/bin/session-restore.sh"),                      0o755),
+    ("return-to-gamemode.sh",          Path("/usr/local/bin/return-to-gamemode.sh"),                   0o755),
+    ("session-restore.service",        Path("/etc/systemd/system/session-restore.service"),            0o644),
+    ("90-mode-saver.rules",            Path("/etc/polkit-1/rules.d/90-mode-saver.rules"),              0o644),
+    ("steamos-gamemode.desktop",       Path("/usr/share/applications/steamos-gamemode.desktop"),       0o644),
+]
+
+DESKTOP_FILE       = Path("/usr/share/applications/steamos-gamemode.desktop")
+DESKTOP_BACKUP_DIR = Path("/usr/local/share/mode-saver")
+DESKTOP_BACKUP     = DESKTOP_BACKUP_DIR / "steamos-gamemode.desktop.orig"
+SERVICE_NAME       = "session-restore.service"
+UPSTREAM_SCRIPT    = Path("/usr/bin/steamos-session-select")
+PLASMALOGIN_DIR    = Path("/etc/plasmalogin.conf.d")
+SDDM_DIR           = Path("/etc/sddm.conf.d")
+AUTOLOGIN_FILENAME = "zz-steamos-autologin.conf"
+CACHYOS_AUTOLOGIN_UNIT = "cachyos-gamescope-autologin.service"
+
+
+# --- Helpers ---------------------------------------------------------------
+
+def real_user_pwd():
+    """Return pwd entry for the actual user (not root under sudo)."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and sudo_user != "root":
+        try:
+            return pwd.getpwnam(sudo_user)
+        except KeyError:
+            pass
+    if os.geteuid() != 0:
+        return pwd.getpwuid(os.geteuid())
+    for entry in pwd.getpwall():
+        if 1000 <= entry.pw_uid < 60000:
+            return entry
+    raise RuntimeError("no non-system user found")
+
+
+def ensure_root(cmd):
+    if os.geteuid() != 0:
+        print(f"'{cmd}' requires root. Requesting sudo...")
+        os.execvp('sudo', ['sudo', sys.executable, os.path.realpath(__file__)] + sys.argv[1:])
+
+
+def chown_to(path, user):
+    try:
+        os.chown(path, user.pw_uid, user.pw_gid)
+    except (OSError, PermissionError):
+        pass
+
+
+def autologin_conf_path():
+    if PLASMALOGIN_DIR.is_dir():
+        return PLASMALOGIN_DIR / AUTOLOGIN_FILENAME
+    if SDDM_DIR.is_dir():
+        return SDDM_DIR / AUTOLOGIN_FILENAME
+    return None
+
+
+def detect_current_session(user):
+    try:
+        r = subprocess.run(
+            ["loginctl", "show-user", user.pw_name, "-p", "Display", "--value"],
+            capture_output=True, text=True, check=False,
+        )
+        display = r.stdout.strip()
+        if display:
+            r = subprocess.run(
+                ["loginctl", "show-session", display, "-p", "Desktop", "--value"],
+                capture_output=True, text=True, check=False,
+            )
+            if r.stdout.strip() in ("KDE", "plasma"):
+                return "plasma"
+    except FileNotFoundError:
+        pass
+    return "gamescope"
+
+
+def mask_cachyos_autologin(user):
+    """Mask cachyos-gamescope-autologin.service in the user's systemd config
+    via /dev/null symlink (equivalent to `systemctl --user mask`)."""
+    upstream_locations = [
+        Path("/usr/lib/systemd/user") / CACHYOS_AUTOLOGIN_UNIT,
+        Path("/etc/systemd/user") / CACHYOS_AUTOLOGIN_UNIT,
+    ]
+    if not any(p.exists() for p in upstream_locations):
+        return
+
+    user_dir = Path(user.pw_dir) / ".config/systemd/user"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    chown_to(user_dir.parent, user)
+    chown_to(user_dir, user)
+
+    mask_link = user_dir / CACHYOS_AUTOLOGIN_UNIT
+    if mask_link.is_symlink():
+        return
+    if mask_link.exists():
+        mask_link.unlink()
+    mask_link.symlink_to("/dev/null")
+    try:
+        os.lchown(mask_link, user.pw_uid, user.pw_gid)
+    except OSError:
+        pass
+    print(f"Masked   {CACHYOS_AUTOLOGIN_UNIT} for {user.pw_name}")
+
+
+def unmask_cachyos_autologin(user):
+    mask_link = Path(user.pw_dir) / ".config/systemd/user" / CACHYOS_AUTOLOGIN_UNIT
+    if mask_link.is_symlink():
+        mask_link.unlink()
+        print(f"Unmasked {CACHYOS_AUTOLOGIN_UNIT}")
+
+
+# --- Subcommands -----------------------------------------------------------
+
+def cmd_install():
+    ensure_root("install")
+
+    if not UPSTREAM_SCRIPT.exists():
+        print(f"ERROR: {UPSTREAM_SCRIPT} not found. mode-saver targets CachyOS-Handheld.",
+              file=sys.stderr)
+        return 1
+
+    missing = [src for src, _, _ in FILES if not (PROJECT_DIR / src).exists()]
+    if missing:
+        print(f"ERROR: missing source files in {PROJECT_DIR}: {missing}", file=sys.stderr)
+        return 1
+
+    user = real_user_pwd()
+
+    # 1. Backup the system desktop file before overwriting
+    DESKTOP_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    if DESKTOP_FILE.exists() and not DESKTOP_BACKUP.exists():
+        shutil.copy2(DESKTOP_FILE, DESKTOP_BACKUP)
+
+    # 2. Copy all files to their destinations
+    for src, dst, mode in FILES:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PROJECT_DIR / src, dst)
+        dst.chmod(mode)
+        print(f"Installed {dst}")
+
+    # 3. Reload systemd and enable the service
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", SERVICE_NAME], check=True)
+
+    # 4. User Desktop shortcut
+    user_desktop = Path(user.pw_dir) / "Desktop"
+    if user_desktop.is_dir():
+        shortcut = user_desktop / DESKTOP_FILE.name
+        shutil.copy2(PROJECT_DIR / "steamos-gamemode.desktop", shortcut)
+        shortcut.chmod(0o755)
+        chown_to(shortcut, user)
+        print(f"Installed {shortcut}")
+
+    # 5. Clean legacy backups from older mode-saver versions
+    for legacy in (Path("/usr/bin/steamos-session-select.orig"),
+                   Path("/usr/share/applications/steamos-gamemode.desktop.orig")):
+        if legacy.exists():
+            legacy.unlink()
+
+    # 6. Initialise state file (first install only)
+    state_file = Path(user.pw_dir) / ".config/last-session-mode"
+    if not state_file.exists():
+        detected = detect_current_session(user)
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(detected + "\n")
+        chown_to(state_file, user)
+        print(f"Initialised {state_file} = {detected}")
+
+    # 7. Mask cachyos-gamescope-autologin so plasma logout doesn't revert us
+    mask_cachyos_autologin(user)
+
+    # 8. Apply config now (so plasmalogin reflects desired state immediately)
+    subprocess.run(["systemctl", "start", SERVICE_NAME], check=False)
+
+    print()
+    print("Done.")
+    return 0
+
+
+def cmd_uninstall():
+    ensure_root("uninstall")
+    user = real_user_pwd()
+
+    # 1. Disable the service before removing its file
+    subprocess.run(["systemctl", "disable", SERVICE_NAME],
+                   check=False, capture_output=True)
+
+    # 2. Reset autologin to gamescope default (do this BEFORE removing helpers
+    #    so the system stays bootable into Game Mode)
+    conf = autologin_conf_path()
+    if conf is not None:
+        conf.write_text("[Autologin]\nSession=gamescope-session.desktop\n")
+        conf.chmod(0o644)
+        print(f"Reset    {conf} to gamescope default")
+
+    # 3. Remove all installed files (restore desktop file from backup if any)
+    for _, dst, _ in FILES:
+        if dst == DESKTOP_FILE and DESKTOP_BACKUP.exists():
+            shutil.copy2(DESKTOP_BACKUP, dst)
+            dst.chmod(0o644)
+            print(f"Restored {dst} from backup")
+            continue
+        if dst.exists() or dst.is_symlink():
+            dst.unlink()
+            print(f"Removed  {dst}")
+
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+
+    # 4. User Desktop shortcut
+    user_shortcut = Path(user.pw_dir) / "Desktop" / DESKTOP_FILE.name
+    if user_shortcut.exists():
+        user_shortcut.unlink()
+        print(f"Removed  {user_shortcut}")
+
+    # 5. Clean backup dir
+    if DESKTOP_BACKUP_DIR.exists():
+        shutil.rmtree(DESKTOP_BACKUP_DIR, ignore_errors=True)
+
+    # 6. Remove state file
+    state_file = Path(user.pw_dir) / ".config/last-session-mode"
+    if state_file.exists():
+        state_file.unlink()
+        print(f"Removed  {state_file}")
+
+    # 7. Unmask cachyos autologin
+    unmask_cachyos_autologin(user)
+
+    print()
+    print("Done.")
+    return 0
+
+
+def _path_state(p):
+    """Return ('ok' | 'missing' | 'unknown') for a path. 'unknown' means we
+    couldn't stat it (e.g. parent directory is root-only, like polkit's
+    rules.d) — a sudo check would clarify."""
+    try:
+        os.stat(p, follow_symlinks=False)
+        return 'ok'
+    except FileNotFoundError:
+        return 'missing'
+    except PermissionError:
+        return 'unknown'
+
+
+def cmd_doctor():
+    print("=== mode-saver doctor ===\n")
+    issues = []
+
+    if UPSTREAM_SCRIPT.exists():
+        print(f"[ok]   upstream:  {UPSTREAM_SCRIPT}")
+    else:
+        issues.append(f"{UPSTREAM_SCRIPT} not found (CachyOS-Handheld?)")
+
+    markers = {'ok': '[ok]  ', 'missing': '[info]', 'unknown': '[?]   '}
+    for _, dst, _ in FILES:
+        print(f"{markers[_path_state(dst)]} {dst}")
+
+    user = real_user_pwd()
+    state_file = Path(user.pw_dir) / ".config/last-session-mode"
+    if state_file.exists():
+        print(f"[ok]   state: {state_file} = {state_file.read_text().strip()}")
+    else:
+        print(f"[info] no state file at {state_file}")
+
+    service_file = Path("/etc/systemd/system/session-restore.service")
+    if service_file.exists():
+        r = subprocess.run(["systemctl", "is-enabled", SERVICE_NAME],
+                           capture_output=True, text=True)
+        print(f"       service is-enabled: {r.stdout.strip()}")
+
+    print()
+    if issues:
+        print("Issues:")
+        for i in issues:
+            print(f"  - {i}")
+        return 1
+    print("All checks passed.")
+    return 0
+
+
+# --- CLI -------------------------------------------------------------------
+
+def show_help():
+    print("""Mode Saver installer for CachyOS-Handheld
+
+Usage: mode-saver <command>
+
+Commands:
+  install    Install mode-saver. Auto-elevates to sudo.
+  uninstall  Remove mode-saver and reset autologin to gamescope default. Auto-elevates.
+  doctor     Show installation status.
+  help       Show this help.
+
+The runtime helpers (steamos-session-select-wrapper, session-restore.sh,
+return-to-gamemode.sh, session-restore.service, 90-mode-saver.rules,
+steamos-gamemode.desktop) live next to this installer in the project
+directory. `install` copies them to the standard system locations
+(/usr/local/bin, /etc/systemd/system, /etc/polkit-1/rules.d,
+/usr/share/applications). After install the project directory is no
+longer needed at runtime; only re-running `uninstall` requires it to
+exist.
+""")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("help", "--help", "-h"):
+        show_help()
+        return 0
+    cmd = args[0]
+    handlers = {
+        "install":   cmd_install,
+        "uninstall": cmd_uninstall,
+        "doctor":    cmd_doctor,
+    }
+    h = handlers.get(cmd)
+    if h is None:
+        print(f"Unknown command: {cmd}\n")
+        show_help()
+        return 2
+    rc = h()
+    return rc if isinstance(rc, int) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

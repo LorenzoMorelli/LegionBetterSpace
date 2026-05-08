@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore last session mode on boot
+Before=sddm.service plasmalogin.service display-manager.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/session-restore.sh
+
+[Install]
+WantedBy=multi-user.target
