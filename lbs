@@ -56,8 +56,8 @@ def run_subcommand(tool, subcommand):
 def pick_tool(action):
     print(f"\nWhich service to {action}?")
     for i, (name, _, marker) in enumerate(TOOLS, 1):
-        status = "installed" if is_installed(marker) else "not installed"
-        print(f"  {i}) {name:22} [{status}]")
+        status = "installed    " if is_installed(marker) else "NOT installed"
+        print(f"  {i}) [{status}]  {name}")
     print("  b) Back")
     while True:
         choice = input("> ").strip().lower()
@@ -92,11 +92,11 @@ def cmd_doctor_all():
 
 def show_main_menu():
     print()
-    print("=" * 40)
+    print("=" * 50)
     print("  LegionBetterSpace")
-    print("=" * 40)
+    print("=" * 50)
     for name, _, marker in TOOLS:
-        status = "[installed]" if is_installed(marker) else "[--       ]"
+        status = "[installed    ]" if is_installed(marker) else "[NOT installed]"
         print(f"  {status}  {name}")
     print()
     print("  i) Install a service")

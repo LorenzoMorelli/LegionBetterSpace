@@ -257,19 +257,29 @@ def cmd_uninstall():
 
 
 def _path_state(p):
-    """Return ('ok' | 'missing' | 'unknown') for a path. 'unknown' means we
-    couldn't stat it (e.g. parent directory is root-only, like polkit's
-    rules.d) — a sudo check would clarify."""
+    """Return ('ok' | 'missing') for a path. Auto-elevation upstream
+    guarantees we have permission to stat every path we care about."""
     try:
         os.stat(p, follow_symlinks=False)
         return 'ok'
     except FileNotFoundError:
         return 'missing'
-    except PermissionError:
-        return 'unknown'
+
+
+def _doctor_needs_root():
+    """True if any path we want to check lives in a directory we cannot
+    traverse as the current user (e.g. polkit's rules.d at mode 700)."""
+    for _, dst, _ in FILES:
+        if dst.parent.exists() and not os.access(dst.parent, os.X_OK):
+            return True
+    return False
 
 
 def cmd_doctor():
+    if os.geteuid() != 0 and _doctor_needs_root():
+        print("(escalating to root for full visibility on restricted dirs)")
+        ensure_root("doctor")
+
     print("=== mode-saver doctor ===\n")
     issues = []
 
@@ -278,7 +288,7 @@ def cmd_doctor():
     else:
         issues.append(f"{UPSTREAM_SCRIPT} not found (CachyOS-Handheld?)")
 
-    markers = {'ok': '[ok]  ', 'missing': '[info]', 'unknown': '[?]   '}
+    markers = {'ok': '[ok]  ', 'missing': '[--]  '}
     for _, dst, _ in FILES:
         print(f"{markers[_path_state(dst)]} {dst}")
 
