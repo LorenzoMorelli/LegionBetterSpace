@@ -21,12 +21,12 @@ Each tool is **standalone**, **lightweight**, and designed to work seamlessly wi
 
 | Device | Status |
 |--------|--------|
-| Legion Go 2 | ✅ Supported |
-| Legion Go (Original) | ❌ Not tested |
+| Legion Go 2 | Supported |
+| Legion Go (Original) | Not tested |
 
 ## Tools
 
-### 🎨 [controller-rgb](./controller-rgb/)
+### [controller-rgb](./controller-rgb/)
 
 Control the RGB LEDs on the joystick rings.
 
@@ -49,7 +49,7 @@ controller-rgb brightness 50
 
 ---
 
-### 👆 [gamescope-gestures](./gamescope-gestures/)
+### [gamescope-gestures](./gamescope-gestures/)
 
 Add touch gestures for Steam/Gamescope integration.
 
@@ -69,7 +69,7 @@ Add touch gestures for Steam/Gamescope integration.
 
 ---
 
-### ☀️ [brightness-bridge](./brightness-bridge/)
+### [brightness-bridge](./brightness-bridge/)
 
 Make the native Steam brightness slider actually change brightness when
 HDR PQ is active in Game Mode.
@@ -92,7 +92,7 @@ HDR PQ is active in Game Mode.
 
 ## Miscellaneous
 
-### 💾 [mode-saver](./mode-saver/)
+### [mode-saver](./mode-saver/)
 
 Remember your last session mode (Game Mode or Desktop Mode) across reboots.
 
@@ -190,23 +190,6 @@ sudo apt install python3-evdev
 ```
 
 
-## Comparison with Legion Space
-
-| Feature | Legion Space (Windows) | LegionBetterSpace (Linux) |
-|---------|------------------------|---------------------------|
-| RGB Control | ✅ | ✅ controller-rgb |
-| Touch Gestures | ❌ | ✅ gamescope-gestures |
-| Session Mode Memory | ❌ | ✅ mode-saver |
-| TDP Control | ✅ | 🔄 Use steamos-manager |
-| Nice UI | ✅ | 🔄 Planned (via decky plugin) |
-| Controller Config | ✅ | 🔄 Planned (extra buttons mapping via inputplumber) |
-| Fan Control | ✅ | 🔄 Planned |
-| Power LED Control | ✅ | 🔄 Planned |
-| Battery Charge Limit | ✅ | 🔄 Planned |
-| Open Source | ❌ | ✅ |
-| Bloat-free | ❌ | ✅ |
-| Works in Game Mode | ❌ | ✅ |
-
 ## Contributing
 
 Contributions are welcome! If you have a Legion Go and want to help:
@@ -219,7 +202,3 @@ Contributions are welcome! If you have a Legion Go and want to help:
 ## License
 
 MIT License - Feel free to modify and distribute.
-
----
-
-**Made with ❤️ for the Linux handheld gaming community**
