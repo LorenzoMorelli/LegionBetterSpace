@@ -118,7 +118,7 @@ cd /path/to/LegionBetterSpace/mode-saver
 ### One-liner (clone, install, cleanup)
 
 ```bash
-T=$(mktemp -d) && git clone https://github.com/yourusername/LegionBetterSpace "$T" && "$T/lbs"; rm -rf "$T"
+T=$(mktemp -d) && git clone https://github.com/LorenzoMorelli/LegionBetterSpace "$T" && "$T/lbs"; rm -rf "$T"
 ```
 
 Clones into a temp directory, runs the interactive installer, removes the
@@ -134,7 +134,7 @@ runtime.
 ### Clone for development or repeated use
 
 ```bash
-git clone https://github.com/yourusername/LegionBetterSpace ~/Projects/LegionBetterSpace
+git clone https://github.com/LorenzoMorelli/LegionBetterSpace ~/Projects/LegionBetterSpace
 cd ~/Projects/LegionBetterSpace
 ./lbs
 ```
