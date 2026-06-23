@@ -16,10 +16,13 @@ import signal
 import time
 from pathlib import Path
 
-BACKLIGHT_DIR   = "/sys/class/backlight/amdgpu_bl1"
-BRIGHTNESS_FILE = f"{BACKLIGHT_DIR}/brightness"
-ACTUAL_FILE     = f"{BACKLIGHT_DIR}/actual_brightness"
-MAX_FILE        = f"{BACKLIGHT_DIR}/max_brightness"
+# The backlight device under /sys/class/backlight. The numeric suffix
+# (amdgpu_bl0, amdgpu_bl1, ...) is assigned by the kernel at enumeration time
+# and is not stable across devices/kernels, so we auto-detect it instead of
+# hardcoding one. Set BRIGHTNESS_BRIDGE_BACKLIGHT (device name or full path) to
+# force a specific device.
+BACKLIGHT_ROOT     = Path("/sys/class/backlight")
+BACKLIGHT_OVERRIDE = os.environ.get("BRIGHTNESS_BRIDGE_BACKLIGHT")
 
 ATOM_NAME = "GAMESCOPE_SDR_ON_HDR_CONTENT_BRIGHTNESS"
 NITS_MIN  = 5.0
@@ -43,6 +46,32 @@ INSTALLED_SCRIPT = USER_BIN_DIR / "brightness-bridge"
 def read_int(path):
     with open(path) as f:
         return int(f.read().strip())
+
+
+def find_backlight():
+    """Return the backlight sysfs directory to use, or None if none is usable.
+
+    Honors the BRIGHTNESS_BRIDGE_BACKLIGHT override, otherwise prefers amdgpu
+    panels (the internal display) and falls back to any other backlight.
+    """
+    if BACKLIGHT_OVERRIDE:
+        d = Path(BACKLIGHT_OVERRIDE)
+        if not d.is_absolute():
+            d = BACKLIGHT_ROOT / d
+        return d if (d / "brightness").exists() else None
+
+    amdgpu = sorted(BACKLIGHT_ROOT.glob("amdgpu_bl*"))
+    others = sorted(p for p in BACKLIGHT_ROOT.glob("*")
+                    if not p.name.startswith("amdgpu_bl"))
+    for d in amdgpu + others:
+        if (d / "brightness").exists():
+            return d
+    return None
+
+
+def backlight_files(d):
+    """Return (brightness, actual_brightness, max_brightness) paths for dir d."""
+    return d / "brightness", d / "actual_brightness", d / "max_brightness"
 
 
 def get_display():
@@ -87,26 +116,29 @@ def wait_for_gamescope(timeout=30):
 
 
 def run_daemon():
-    if not Path(BACKLIGHT_DIR).exists():
-        print(f"FATAL: {BACKLIGHT_DIR} not found", flush=True)
+    backlight = find_backlight()
+    if backlight is None:
+        print(f"FATAL: no usable backlight found under {BACKLIGHT_ROOT}",
+              flush=True)
         return 2
+    brightness_file, actual_file, max_file = backlight_files(backlight)
 
-    print(f"brightness-bridge starting (atom={ATOM_NAME}, "
-          f"range={NITS_MIN}-{NITS_MAX} nits)", flush=True)
+    print(f"brightness-bridge starting (backlight={backlight.name}, "
+          f"atom={ATOM_NAME}, range={NITS_MIN}-{NITS_MAX} nits)", flush=True)
 
     if not wait_for_gamescope(30):
         print(f"WARN: {GAMESCOPE_ENV} not found after 30s", flush=True)
 
-    bmax = read_int(MAX_FILE)
+    bmax = read_int(max_file)
     print(f"max_brightness={bmax}", flush=True)
 
     # poll(POLLPRI) on actual_brightness wakes us via sysfs_notify - no polling.
-    fd = os.open(ACTUAL_FILE, os.O_RDONLY)
+    fd = os.open(actual_file, os.O_RDONLY)
     poller = select.poll()
     poller.register(fd, select.POLLPRI | select.POLLERR)
 
     os.lseek(fd, 0, 0); os.read(fd, 32)
-    last = read_int(BRIGHTNESS_FILE)
+    last = read_int(brightness_file)
     pct = last * 100.0 / bmax
     ok, nits = set_atom(pct, get_display())
     print(f"initial brightness={last} ({pct:.0f}%) -> {nits:.1f} nits "
@@ -135,7 +167,7 @@ def run_daemon():
             return 1
 
         try:
-            cur = read_int(BRIGHTNESS_FILE)
+            cur = read_int(brightness_file)
         except (OSError, ValueError):
             continue
         if cur == last:
@@ -223,16 +255,21 @@ def doctor():
     print("=== brightness-bridge doctor ===\n")
     issues = []
 
-    if Path(BRIGHTNESS_FILE).exists():
+    backlight = find_backlight()
+    if backlight is not None:
+        brightness_file, _, max_file = backlight_files(backlight)
         try:
-            cur = read_int(BRIGHTNESS_FILE)
-            mx  = read_int(MAX_FILE)
-            print(f"[ok]   backlight: {BACKLIGHT_DIR}  ({cur}/{mx} = "
+            cur = read_int(brightness_file)
+            mx  = read_int(max_file)
+            print(f"[ok]   backlight: {backlight}  ({cur}/{mx} = "
                   f"{cur*100/mx:.0f}%)")
         except OSError as e:
-            issues.append(f"cannot read {BRIGHTNESS_FILE}: {e}")
+            issues.append(f"cannot read {brightness_file}: {e}")
+    elif BACKLIGHT_OVERRIDE:
+        issues.append(f"BRIGHTNESS_BRIDGE_BACKLIGHT={BACKLIGHT_OVERRIDE} "
+                      f"has no readable brightness file")
     else:
-        issues.append(f"backlight not found at {BACKLIGHT_DIR}")
+        issues.append(f"no usable backlight found under {BACKLIGHT_ROOT}")
 
     if subprocess.run(["which", "xprop"], capture_output=True).returncode != 0:
         issues.append("xprop not found (sudo pacman -S xorg-xprop)")
