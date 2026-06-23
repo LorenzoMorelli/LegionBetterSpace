@@ -9,9 +9,16 @@ Workaround for
 ## How it works
 
 A small user-space daemon watches the kernel backlight file
-(`/sys/class/backlight/amdgpu_bl1/actual_brightness`) via `poll(POLLPRI)` -
+(`/sys/class/backlight/<device>/actual_brightness`) via `poll(POLLPRI)` -
 `sysfs_notify` wakes us on every slider movement, so there is no polling
 loop and the daemon stays at 0% CPU when idle.
+
+The backlight device is auto-detected at startup: the numeric suffix
+(`amdgpu_bl0`, `amdgpu_bl1`, ...) is assigned by the kernel at enumeration
+time and is not stable across devices/kernels, so the daemon prefers an
+`amdgpu_bl*` panel and falls back to any other backlight. To force a
+specific device, set `BRIGHTNESS_BRIDGE_BACKLIGHT` (a device name or full
+path) in the service environment.
 
 When the value changes, the daemon mirrors it (as 5-500 nits, encoded as a
 32-bit float) into the X11 atom `GAMESCOPE_SDR_ON_HDR_CONTENT_BRIGHTNESS`

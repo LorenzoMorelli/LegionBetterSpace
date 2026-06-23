@@ -26,29 +26,6 @@ Each tool is **standalone**, **lightweight**, and designed to work seamlessly wi
 
 ## Tools
 
-### [controller-rgb](./controller-rgb/)
-
-Control the RGB LEDs on the joystick rings.
-
-**Features**:
-- Custom colors (RGB/Hex)
-- Built-in presets (red, green, blue, cyan, purple, etc.)
-- Effects (monocolor, breathe, chroma, rainbow)
-- Brightness and speed control
-- Automatic persistence across reboots
-
-**Quick Start**:
-```bash
-./controller-rgb/controller-rgb install   # one-time setup (auto-sudo)
-controller-rgb preset cyan                # then use from anywhere
-controller-rgb effect rainbow
-controller-rgb brightness 50
-```
-
-[Full Documentation →](./controller-rgb/README.md)
-
----
-
 ### [gamescope-gestures](./gamescope-gestures/)
 
 Add touch gestures for Steam/Gamescope integration.
@@ -56,13 +33,11 @@ Add touch gestures for Steam/Gamescope integration.
 **Features**:
 - Swipe from right edge → Open QAM (Quick Access Menu)
 - Swipe from left edge → Open Steam Menu
-- Works in both KDE and Gamescope
-- Runs as a system service
 
 **Quick Start**:
 ```bash
-./gamescope-gestures/gamescope-gestures doctor    # Check system (auto-sudo)
-./gamescope-gestures/gamescope-gestures install   # Install service (auto-sudo)
+./gamescope-gestures/gamescope-gestures doctor    # Check system (will ask for password)
+./gamescope-gestures/gamescope-gestures install   # Install service (will ask for password)
 ```
 
 [Full Documentation →](./gamescope-gestures/README.md)
@@ -90,8 +65,6 @@ HDR PQ is active in Game Mode.
 
 ---
 
-## Miscellaneous
-
 ### [mode-saver](./mode-saver/)
 
 Remember your last session mode (Game Mode or Desktop Mode) across reboots.
@@ -104,10 +77,33 @@ Remember your last session mode (Game Mode or Desktop Mode) across reboots.
 **Quick Start**:
 ```bash
 cd /path/to/LegionBetterSpace/mode-saver
-./mode-saver install   # auto-elevates to sudo
+./mode-saver install   # will ask for password
 ```
 
 [Full Documentation →](./mode-saver/README.md)
+
+---
+
+### [controller-rgb](./controller-rgb/)
+
+Control the RGB LEDs on the joystick rings.
+
+**Features**:
+- Custom colors (RGB/Hex)
+- Built-in presets (red, green, blue, cyan, purple, etc.)
+- Effects (monocolor, breathe, chroma, rainbow)
+- Brightness and speed control
+- Automatic persistence across reboots
+
+**Quick Start**:
+```bash
+./controller-rgb/controller-rgb install   # one-time setup (will ask for password)
+controller-rgb preset cyan                # then use from anywhere
+controller-rgb effect rainbow
+controller-rgb brightness 50
+```
+
+[Full Documentation →](./controller-rgb/README.md)
 
 ---
 
@@ -144,7 +140,7 @@ cd ~/Projects/LegionBetterSpace
 ```
 
 Menu-driven: pick services to install/uninstall, run `doctor` on all of
-them, or quit. The menu loops until you exit and auto-elevates to sudo
+them, or quit. The menu loops until you exit and asks for your password
 only for the tools that need it.
 
 ### Install individual tools
@@ -154,9 +150,9 @@ identical interface across all four:
 
 ```bash
 ./brightness-bridge/brightness-bridge install      # → ~/.local/bin (no sudo)
-./controller-rgb/controller-rgb install            # → /usr/local/bin (auto-sudo)
-./gamescope-gestures/gamescope-gestures install    # → /usr/local/bin (auto-sudo)
-./mode-saver/mode-saver install                    # → /usr/local/bin + /etc (auto-sudo)
+./controller-rgb/controller-rgb install            # → /usr/local/bin (will ask for password)
+./gamescope-gestures/gamescope-gestures install    # → /usr/local/bin (will ask for password)
+./mode-saver/mode-saver install                    # → /usr/local/bin + /etc (will ask for password)
 ```
 
 To uninstall any tool, run its `uninstall` subcommand from the same path.

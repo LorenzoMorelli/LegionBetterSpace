@@ -29,14 +29,14 @@ Steam's own PIN/Family-View passcode is independent and must be enabled inside S
 
 ```bash
 cd mode-saver
-./mode-saver install      # auto-elevates to sudo
+./mode-saver install      # will ask for password
 ```
 
 ## Uninstallation
 
 ```bash
 cd mode-saver
-./mode-saver uninstall    # auto-elevates to sudo
+./mode-saver uninstall    # will ask for password
 ```
 
 ## Status check

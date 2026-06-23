@@ -40,7 +40,7 @@ The script writes directly to the kernel's sysfs interface for LED control. Sett
 # Navigate to the script directory
 cd /path/to/LegionBetterSpace/controller-rgb
 
-# Install (auto-elevates to sudo)
+# Install (will ask for password)
 ./controller-rgb install
 ```
 
@@ -64,8 +64,8 @@ command works from any terminal, no sudo required for daily use.
 | `on` | Turn LEDs on (40% brightness) |
 | `off` | Turn LEDs off |
 | `status` | Show current LED settings |
-| `install` | Install to `/usr/local/bin` and enable persistence (auto-elevates) |
-| `uninstall` | Remove the installed copy, udev rule, and optionally the config (auto-elevates) |
+| `install` | Install to `/usr/local/bin` and enable persistence (requires root privileges) |
+| `uninstall` | Remove the installed copy, udev rule, and optionally the config (requires root privileges) |
 
 ### Color Presets
 
