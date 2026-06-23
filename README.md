@@ -96,12 +96,10 @@ HDR PQ is active in Game Mode.
 
 Remember your last session mode (Game Mode or Desktop Mode) across reboots.
 
-**Problem Solved**: By default, CachyOS-Handheld always restarts in Game Mode, even if your last session was in Desktop Mode.
-
 **How it works**:
-- Wrapper for `steamos-session-select` saves the current mode
-- systemd service restores the mode at boot
-- Works with the "Return to Gaming Mode" button
+- By design, CachyOS-Handheld always boots into Game Mode, regardless of your last session.
+- This tool instead saves the mode you last used and boots straight back into it.
+- Works with the "Return to Gaming Mode" button.
 
 **Quick Start**:
 ```bash
@@ -167,7 +165,7 @@ To uninstall any tool, run its `uninstall` subcommand from the same path.
 
 | Tool | Dependencies |
 |------|--------------|
-| controller-rgb | bash, sudo (for persistence) |
+| controller-rgb | python3, sudo (for persistence), qdbus6 (optional, KDE/Kameleon) |
 | gamescope-gestures | python3, python-evdev, InputPlumber |
 | brightness-bridge | python3 (stdlib only), xorg-xprop |
 | mode-saver | bash, python3 (installer), sudo, SDDM/plasmalogin (CachyOS-Handheld) |

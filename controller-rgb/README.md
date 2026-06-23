@@ -14,16 +14,16 @@ A simple command-line tool to control the RGB LEDs on the Legion Go 2 joystick r
 ## How It Works
 
 ```
-┌─────────────────┐     ┌──────────────────────────────────────┐
-│   controller-rgb    │────▶│  /sys/class/leds/go:rgb:joystick_rings │
-│    (script)     │     │         (kernel sysfs interface)      │
-└─────────────────┘     └──────────────────────────────────────┘
-        │
-        ▼
-┌─────────────────┐     ┌──────────────────────────────────────┐
-│  udev rule      │────▶│  Restores settings on boot/resume    │
-│  (persistence)  │     │  /etc/udev/rules.d/99-controller-rgb.rules│
-└─────────────────┘     └──────────────────────────────────────┘
+┌─────────────────────┐       ┌─────────────────────────────────────────────┐
+│   controller-rgb    │────▶  │  /sys/class/leds/go:rgb:joystick_rings      │
+│      (script)       │       │          (kernel sysfs interface)           │
+└─────────────────────┘       └─────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────┐       ┌─────────────────────────────────────────────┐
+│     udev rule       │────▶  │  Restores settings on boot/resume           │
+│   (persistence)     │       │  /etc/udev/rules.d/99-controller-rgb.rules  │
+└─────────────────────┘       └─────────────────────────────────────────────┘
 ```
 
 The script writes directly to the kernel's sysfs interface for LED control. Settings are saved to `~/.config/controller-rgb.conf` and restored automatically via a udev rule.
